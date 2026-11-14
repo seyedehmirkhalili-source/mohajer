@@ -1408,13 +1408,22 @@ class ShopRequestedChangesTests(SalesCase):
         tok = self.fake_create(30, 30, 'Alice')
         c = bot.db(); c.execute("INSERT INTO shop_services(token,tg_id,kind,created_ts) VALUES(?,?,'paid',1)", (tok, ALICE)); c.commit(); c.close()
         text = 'vless://new-current-config\n' * 300
-        with tempfile.TemporaryDirectory() as folder, patch.object(bot, 'SUB_DIR', folder), patch.object(shop, 'upload', return_value={'ok': True}) as upload:
+        with tempfile.TemporaryDirectory() as folder, patch.object(bot, 'SUB_DIR', folder), patch.object(shop, 'upload', return_value={'ok': True}) as upload, patch.object(shop.time, 'sleep') as sleep:
             def fresh(*args): Path(bot.sub_path(tok)).write_bytes(base64.b64encode(text.encode()))
             with patch.object(bot, 'write_sub', side_effect=fresh) as write:
                 shop.send_connection(BOB, BOB, tok, 'configs')
                 upload.assert_not_called(); write.assert_not_called()
+                self.calls.clear()
                 shop.send_connection(ALICE, ALICE, tok, 'configs')
-                self.assertEqual(upload.call_args.args[4].decode(), text)
+                import html
+                messages = self.texts(ALICE)
+                self.assertGreater(len(messages), 1)
+                chunks = [html.unescape(message[5:-6]) for message in messages]
+                self.assertEqual('\n'.join(chunks) + '\n', text)
+                self.assertTrue(all(message.startswith('<pre>') and message.endswith('</pre>') for message in messages))
+                self.assertTrue(all(len(chunk.encode('utf-16-le')) // 2 <= 4096 for chunk in chunks))
+                self.assertEqual(sleep.call_count, len(messages) - 1)
+                upload.assert_not_called()
                 write.assert_called_once()
                 shop.send_connection(ALICE, ALICE, tok, 'qr')
                 self.assertEqual(upload.call_args.args[0], 'sendPhoto')

@@ -76,6 +76,6 @@ class CheckoutSimplificationTests(SalesCase):
 
     def test_connection_button_labels_match_requested_names(self):
         buttons=shop.connection_buttons('test')
-        self.assertEqual(buttons[1]['text'],'دریافت فایل کانفیگ‌ها')
+        self.assertEqual(buttons[1]['text'],'دریافت متن کانفیگ‌ها')
         password=[b for row in shop.service_kb('test') for b in row if b.get('callback_data')=='c:rotate:test']
         self.assertEqual(password[0]['text'],'تغییر رمز اتصال')

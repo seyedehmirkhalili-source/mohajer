@@ -411,7 +411,24 @@ def require_terms(chat, mid, uid, plan_id, token=None):
 # --- connection exports ---
 def connection_buttons(token):
     return [{"text": "دریافت QR Code", "callback_data": "c:qr:" + token},
-            {"text": "دریافت فایل کانفیگ‌ها", "callback_data": "c:configs:" + token}]
+            {"text": "دریافت متن کانفیگ‌ها", "callback_data": "c:configs:" + token}]
+
+def config_messages(text):
+    messages, lines, size = [], [], 0
+    for line in text.splitlines():
+        if not line.strip(): continue
+        # Telegram measures entities in UTF-16; count before HTML escaping.
+        length = len(line.encode("utf-16-le")) // 2
+        if length > 4096:
+            raise ValueError("Config exceeds Telegram message limit")
+        if lines and size + 1 + length > 4096:
+            messages.append("<pre>" + html.escape("\n".join(lines), quote=False) + "</pre>")
+            lines, size = [], 0
+        size += length + bool(lines)
+        lines.append(line)
+    if lines:
+        messages.append("<pre>" + html.escape("\n".join(lines), quote=False) + "</pre>")
+    return messages
 
 def qr_png(text):
     qr = QrCode.encode_text(text, QrCode.Ecc.MEDIUM)
@@ -501,6 +518,29 @@ def retry_rotations():
         if new:
             core.send(job["tg_id"], "لینک و کانفیگ‌های قبلی باطل شدند. اطلاعات جدید اتصال شما:", link_kb(new))
 
+_connection_lock = threading.Lock()
+_connection_chats = set()
+
+def start_connection_export(chat, uid, token, kind):
+    with _connection_lock:
+        if chat in _connection_chats:
+            error = "ارسال قبلی کانفیگ‌ها هنوز تمام نشده؛ کمی صبر کنید."
+        elif len(_connection_chats) >= 4:
+            error = "ارسال کانفیگ‌ها الان شلوغ است؛ کمی بعد دوباره امتحان کنید."
+        else:
+            _connection_chats.add(chat)
+            error = None
+    if error:
+        core.send(chat, error); return
+    def work():
+        try: send_connection(chat, uid, token, kind)
+        finally:
+            with _connection_lock: _connection_chats.discard(chat)
+    try: threading.Thread(target=work, daemon=True).start()
+    except Exception:
+        with _connection_lock: _connection_chats.discard(chat)
+        raise
+
 def send_connection(chat, uid, token, kind):
     u = owned_service(uid, token)
     if not u:
@@ -514,11 +554,19 @@ def send_connection(chat, uid, token, kind):
             core.write_sub(token, u["uuid"], u["label"])
             with open(core.sub_path(token), "rb") as f:
                 text = base64.b64decode(f.read(), validate=True).decode("utf-8")
-            if not text.strip():
+            try: messages = config_messages(text)
+            except ValueError:
+                core.send(chat, "یکی از کانفیگ‌ها به‌تنهایی از ظرفیت پیام تلگرام بلندتر است. برای دریافت کامل کانفیگ‌ها از لینک اشتراک استفاده کنید:\n<code>%s</code>" % html.escape(core.sub_url(token)))
+                return
+            if not messages:
                 core.send(chat, "فعلاً کانفیگی برای این سرویس فعال نیست."); return
-            # A UTF-8 attachment preserves every config even beyond Telegram's message limit.
-            result = upload("sendDocument", chat, "document", "configs.txt", text.encode("utf-8"),
-                            "متن کامل و به‌روز کانفیگ‌های «%s»" % html.escape(u["label"] or ""))
+            for index, message in enumerate(messages):
+                if index: time.sleep(1)
+                result = core.send(chat, message) or {}
+                if not result.get("ok"):
+                    core.send(chat, "ارسال متن کانفیگ‌ها کامل نشد؛ کمی بعد دوباره امتحان کنید.")
+                    return
+            return
         if not result.get("ok"):
             core.send(chat, "ارسال انجام نشد؛ کمی بعد دوباره امتحان کنید.")
     except Exception as e:
@@ -2255,7 +2303,10 @@ def customer_callback(chat, mid, uid, data, cbid, user=None):
             core.edit(chat, mid, "جایگزینی اطلاعات اتصال هنوز کامل نشده؛ ربات دوباره تلاش می‌کند. اطلاعات جدید در بخش سرویس‌های من نمایش داده می‌شود.")
         return
     if len(parts) == 3 and parts[:2] in (["c", "qr"], ["c", "configs"]):
-        core.answer(cbid); send_connection(chat, uid, parts[2], parts[1]); return
+        core.answer(cbid)
+        if parts[1] == "configs": start_connection_export(chat, uid, parts[2], parts[1])
+        else: send_connection(chat, uid, parts[2], parts[1])
+        return
     if parts[:2] == ["c", "svc"] and len(parts) == 3:
         core.answer(cbid, "بروز شد")   # counters come from the enforcer's own refresh (every POLL seconds); no xray call here
         core.edit(chat, mid, *service_view(uid, parts[2])); return
