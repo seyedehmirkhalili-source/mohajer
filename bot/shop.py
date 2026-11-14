@@ -414,9 +414,12 @@ def connection_buttons(token):
             {"text": "دریافت متن کانفیگ‌ها", "callback_data": "c:configs:" + token}]
 
 def config_messages(text):
+    def reality_first(line):
+        query = line.partition("#")[0].partition("?")[2]
+        return "reality" not in urllib.parse.parse_qs(query).get("security", [])
+    configs = sorted((line for line in text.splitlines() if line.strip()), key=reality_first)
     messages, lines, size = [], [], 0
-    for line in text.splitlines():
-        if not line.strip(): continue
+    for line in configs:
         # Telegram measures entities in UTF-16; count before HTML escaping.
         length = len(line.encode("utf-16-le")) // 2
         if length > 4096:

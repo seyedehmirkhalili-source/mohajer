@@ -14,6 +14,22 @@ def unpack(messages):
 
 
 class ConfigMessageTests(unittest.TestCase):
+    def test_reality_configs_come_first_preserving_each_groups_order(self):
+        other = ['vless://tls?security=tls#Reality', 'trojan://plain#?security=reality',
+                 'vless://none?security=none&label=security%3Dreality']
+        reality = ['vless://first?encryption=none&security=reality&type=tcp#first',
+                   'vless://second?security=%72eality#second']
+        text = '\n'.join([other[0], reality[0], other[1], reality[1], other[2]])
+        self.assertEqual(unpack(shop.config_messages(text)), ['\n'.join(reality + other)])
+
+    def test_reality_order_is_applied_before_message_splitting(self):
+        other = ['vless://' + str(i) + 'x' * 990 + '?security=tls' for i in range(5)]
+        reality = ['vless://reality' + str(i) + 'y' * 990 + '?security=reality' for i in range(5)]
+        chunks = unpack(shop.config_messages('\n'.join(other + reality)))
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual('\n'.join(chunks).splitlines(), reality + other)
+        self.assertTrue(all(len(chunk.encode('utf-16-le')) // 2 <= 4096 for chunk in chunks))
+
     def test_packs_whole_configs_greedily_in_order(self):
         lines = ['vless://' + str(i) + 'x' * 990 for i in range(11)]
         messages = shop.config_messages('\n'.join(lines))
@@ -83,6 +99,12 @@ class ConfigDeliveryTests(ShopCase):
         self.assertTrue(all(p['parse_mode'] == 'HTML' for p in sent))
         self.assertEqual('\n'.join(unpack([p['text'] for p in sent])).splitlines(), lines)
         self.assertEqual(sleep.call_args_list, [((1,),), ((1,),)])
+
+    def test_export_sends_reality_first_without_rewriting_config_content(self):
+        tls = 'vless://tls@host?security=tls&type=ws#Reality-label'
+        reality = 'vless://direct@host?security=reality&type=tcp#direct'
+        self.export(tls + '\n' + reality)
+        self.assertEqual(unpack(self.texts(ALICE)), [reality + '\n' + tls])
 
     def test_failed_send_stops_before_later_chunks_and_is_not_retried(self):
         original = bot.tg
