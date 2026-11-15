@@ -834,7 +834,9 @@ def plans_view(uid, token=None):
         u = owned_service(uid, token)
         head = "🔄 <b>تمدید «%s»</b>\nحجم و زمان پلن به همین سرویس اضافه می‌شه و لینکت عوض نمی‌شه:" % html.escape(u["label"] if u else "")
     else:
-        head = "🛒 <b>خرید سرویس</b>\nیکی از پلن‌ها رو انتخاب کن:"
+        head = ("🛒 <b>خرید سرویس</b>\n\n"
+                "👥 هیچ‌کدوم از بسته‌ها محدودیت تعداد کاربر ندارن.\n\n"
+                "یکی از پلن‌ها رو انتخاب کن:")
     if plans[0]["discount"]:
         head += "\n\n🎁 چون با دعوت دوستت اومدی، <b>%s٪ تخفیف</b> روی اولین خریدت داری (قیمت‌ها با تخفیفه)." % fa(first_buy_discount(uid))
     return head, kb
