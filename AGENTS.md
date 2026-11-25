@@ -283,14 +283,14 @@ On all four panel hosts, the active `xray.service` reads
   is a `:root[data-theme=dark]{…}` override of the same tokens. The admin panel uses
   blue action and chart tokens; the subscriber page uses the same blue palette. Charts
   use `currentColor` so bars follow the theme. Use palette tokens on themeable surfaces.
-- **Edit bot logic:** `bot.py` + `shop.py`, stdlib only. After editing, copy BOTH to the
+- **Edit bot logic:** `bot.py` + `shop.py` + vendored `qrcodegen.py`, no pip dependencies. After editing, copy all three to the
   server path (see table; on the flat live layout that is `/opt/dpbot/shop.py` next to
   `/opt/dpbot/bot.py`), run `cd /opt/dpbot && python3 -c "import shop"` to be sure the
   import resolves, then `systemctl restart dpbot` (live) / `mohajer-bot` (fresh). A box
   that gets only `bot.py` crash-loops on `import shop`.
 - **Admin bot UX:** `/start` shows one reply keyboard — 🔗 لینک‌ها (the legacy inline menu:
-  new link / list / CDN IPs), 🛍 فروشگاه (shop admin), 🧾 رسیدها, 🎫 تیکت‌ها, 🌐 پنل وب
-  (same as `/admin`: one-time web-panel login link). Any `/command` first drops every shop
+  new link / list / CDN IPs), 🛍 فروشگاه (shop admin), 🌐 پنل وب
+  (same as `/admin`: one-time web-panel login link). Receipts and tickets remain inline in the shop menu. Any `/command` first drops every shop
   prompt (`shop.clear_admin_state`), so a stale "type the reply" prompt can never swallow it.
 - **Shop state:** customer input steps live in `shop_customers.state` (sqlite), never in
   the in-memory `pending` dict, which stays admin-only. Shop settings are `meta.shop_*`.
@@ -302,12 +302,10 @@ On all four panel hosts, the active `xray.service` reads
   invoice; correcting the paid amount (≤ 2× invoice) is owner-only, because the difference
   becomes spendable wallet credit. A renewal keeps an unlimited dimension unlimited and adds
   the plan on top of real usage (`_extend_link`).
-- **Auto-renew:** due only on expiry/usage (never on `disabled_ts` alone) and at most once per
-  hour per link (`AUTO_GAP`), otherwise a link xray fails to re-add would be charged every tick.
 - **Wallet:** change balances ONLY via `wallet_apply` (inside a transaction) / `wallet_change`. They
   refuse to go negative and write the ledger row; `(kind, ref)` is unique so a retried credit is a no-op.
 - **Shop ticker** (`shop.tick`, every 60s): daily backup, test follow-ups, expiring unpaid invoices,
-  wallet auto-renewals, then usage/expiry warnings (`warn_flags` bits, reset on every buy/renewal).
+  then usage/expiry warnings (`warn_flags` bits, reset on every buy/renewal).
 - **Referrals:** `referrer_id` is only set when a customer is first created. Invitees get
   `meta.shop_ref_discount`% off until their first approved purchase (`priced()`); the inviter gets
   `meta.shop_ref_reward`% of it once, guarded by the unique ledger ref `ref:<invitee id>`.
@@ -374,3 +372,32 @@ shop_ticket_msgs(id, ticket_id, sender, role customer|staff, text, file, ts)
 
 See `docs/ARCHITECTURE.md` for the full flow diagrams and `docs/OPERATIONS.md` for
 the day-2 runbook.
+
+## Storefront purchase and connection controls (2026-10-24)
+
+- Card invoices use exactly the displayed price after any existing referral discount; no random suffix. Existing invoices keep their recorded amount.
+- Purchase/renewal requires acceptance of the current editable `meta.shop_terms` text. Admin: shop menu → قوانین خرید. Acceptance binds to the plan and service, expires in one hour and is consumed at checkout. Editing terms invalidates earlier acceptance.
+- Free tests have an atomic rolling 30-day cooldown from `shop_customers.test_used_ts`; failed minting restores the prior timestamp.
+- The customer count is distinct owners of a non-deleted paid service backed by a positive-price approved buy/renew order with non-null `delivered_ts`. Deleting the last paid service removes the owner from this count; other paid services keep the owner counted. Visits, trials, wallet top-ups and pending/failed delivery do not count.
+- Service cards export a locally generated subscription QR PNG or current config text. The `c:configs:<token>` button sends sequential HTML `<pre>` messages, each containing as many complete config lines as fit within 4096 UTF-16 units after entity parsing. In exported text, place `security=reality` configs first, preserving relative order within Reality and other configs. Sort before packing; split only between configs and HTML-escape each shared code block. A bounded background worker keeps the update loop responsive and prevents overlapping exports per chat. An individually oversized config returns a subscription-link explanation without truncation or a file fallback. Keep the MIT-licensed vendored `bot/qrcodegen.py` beside the bot and shop modules.
+- Service replacement requires a ten-minute customer confirmation. `shop_rotations` persists retire/activate/done phases, freezes the service during replacement, revokes old Xray identities and sessions, removes the old public subscription, and generates a new token and all credentials. Quota, expiry, usage baseline/daily history, ownership, orders, tickets, custom settings and imported subscription domain survive. The ticker retries unfinished replacements; do not delete its rows, which also prevent stale background work from republishing old subscriptions or identities. Membership operations share an RLock with replacement.
+
+- Transaction history merges wallet ledger events with approved direct card buy/renew orders, ordered by payment/movement time, capped at 30. Card purchases do not change wallet balance and must not be backfilled into its ledger. Wallet-funded purchases and top-ups use their existing ledger entries, avoiding duplicate display. Approved undelivered card purchases show a pending-delivery label.
+
+- Web/bot lifecycle (2026-10-25): `delete_user` calls `shop.forget_service` in the deletion transaction to remove shop ownership, clear service-specific customer prompts, detach ticket context and finish any replacement job. Startup removes legacy orphan service associations. Customer identity, wallet, payment history and old Telegram messages remain. Bot service/renew menus read current `users` rows; manual freeze appears paused. Reopen/refresh the bot view after a web edit to see the current name, quota, expiry and usage baseline.
+
+## Default receipt approval (2026-10-25)
+
+- Owner-only shop toggle `meta.shop_receipt_auto_approve`, default off. Only buy/renew receipts qualify; wallet top-up receipts always require manual approval. Changing the toggle does not auto-approve previously queued receipts.
+- Receiving an eligible receipt atomically records `approved`, `auto_approved=1`, `auto_reviewed=0`. Delivery uses the ordinary idempotent path. Its receipt stays in the admin queue with confirm/reject buttons until owner review. Confirmation finalizes review without adding another service, quota or time; referral and overpayment credits wait for this review. Support cannot finalize or reverse auto-approved receipts.
+- Each receipt-approved renewal records its actual quota/time deltas and prior service metadata in `shop_orders.auto_grant`, in the same transaction as delivery. Rejecting it subtracts only that grant, preserving later additive admin changes, current usage and unlimited dimensions. A buy (including a renewal that minted a replacement for an already-deleted link) is revoked completely. Finite limits never become unlimited on reversal.
+- Owner rejection atomically rejects the order, clears purchase prompts, cancels other unpaid service invoices, and sets `shop_customers.purchase_blocked_until` to 48 hours after rejection. This blocks new card/wallet purchases and manual renewals, but retains access to existing valid services, wallet top-ups and support. Duplicate decisions do not extend the penalty; it survives restarts and expires at the exact timestamp.
+- `shop_receipt_reversals` durably retries Xray revocation/old-quota enforcement and Linux socket teardown, retaining inbound tags even after the service row disappears. `retry_auto_reviews` retries missing owner receipt copies without re-delivering a service. Old manually approved orders remain irreversible through this flow.
+- The customer plan picker shows inline plan buttons and omits per-GB price breakdowns.
+
+## Checkout and manual wallet controls (2026-10-26)
+
+- Checkout always offers card-to-card payment. Wallet payment appears only when the full displayed price is covered; no top-up button or shortfall/top-up suggestion appears during purchase/renewal. Dedicated wallet/top-up pages remain available.
+- Admin → shop → users → select a user offers add, subtract and set-final-balance controls. Setting a final balance, including zero, computes the delta inside `BEGIN IMMEDIATE` and writes through `wallet_apply`; no-op settings do not create fake ledger movements. Amount plus reason is required, and the customer and admin audit receive the change.
+- Recurring wallet renewal is removed: no scheduler, due calculation, worker or toggle remains. Startup resets legacy `shop_services.auto_renew` flags to zero, and old `c:auto:*` buttons cannot re-enable it. Old unfulfilled automatic charges are refunded exactly once instead of renewed. Keep legacy columns and financial records for compatibility and history. Receipt auto-approval remains a separate active feature.
+- Customer buttons are «دریافت فایل کانفیگ‌ها» and «تغییر رمز اتصال»; their existing callbacks/actions remain unchanged.

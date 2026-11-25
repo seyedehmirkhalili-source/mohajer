@@ -5,9 +5,27 @@
 # All config comes from bot.env (see config/bot.env.example). Single-file, runs under systemd.
 import os, re, sys, json, time, html, base64, socket, sqlite3, secrets, threading, subprocess, math, tempfile, ipaddress
 import uuid as uuidlib
+import functools
 import urllib.request, urllib.parse, urllib.error, ssl
 import http.cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# Serialize credential replacement with background resync and panel membership edits.
+_membership_lock = threading.RLock()
+
+def serialized_membership(fn):
+    @functools.wraps(fn)
+    def locked(*args, **kwargs):
+        with _membership_lock:
+            return fn(*args, **kwargs)
+    return locked
+
+def retired_shop_token(token):
+    c = db()
+    try:
+        if not c.execute("SELECT 1 FROM sqlite_master WHERE name='shop_rotations'").fetchone(): return False
+        return c.execute("SELECT 1 FROM shop_rotations WHERE old_token=?", (token,)).fetchone() is not None
+    finally: c.close()
 
 def load_env(path):
     env = {}
@@ -252,7 +270,9 @@ def _adu_inbounds(inbounds):
 def _adu(ep, secret, email):
     return _adu_inbounds([_user_inbound(ep, secret, email)])
 
+@serialized_membership
 def xr_add_user(token, secret):
+    if retired_shop_token(token): return False
     ok = True
     slots = active_slot_keys(token)
     converted = slot_mode_tags(token)
@@ -268,10 +288,12 @@ def xr_add_user(token, secret):
             ok = False
     return ok
 
+@serialized_membership
 def xr_add_users(users):
     """Restore a fleet after restart using one CLI process/API connection."""
     inbounds = {}
     for u in users:
+        if retired_shop_token(u["token"]): continue
         token = u["token"]
         slots = active_slot_keys(token)
         converted = slot_mode_tags(token)
@@ -306,6 +328,7 @@ def _rmu_email(tag, email):
 def _rmu(token, tag):
     return _rmu_email(tag, legacy_email(token, tag))
 
+@serialized_membership
 def xr_remove_user(token):
     # Keep credentials in SQLite for renewal; delete_user forgets them separately.
     c = db()
@@ -407,6 +430,7 @@ def ports_to_kick(online_tags):
     return sorted({ep["port"] for ep in ENDPOINTS if ep["tag"] in online_tags})
 
 def force_disconnect(online_tags):
+    ok = True
     for p in ports_to_kick(online_tags):
         try:
             # Cloudflare transports arrive on loopback; direct REALITY connections
@@ -414,10 +438,13 @@ def force_disconnect(online_tags):
             direct = any(ep["port"] == p and "reality" in ep for ep in ENDPOINTS)
             selector = (["sport", "=", ":%d" % p] if direct else
                         ["dst", "127.0.0.1", "dport", "=", ":%d" % p])
-            subprocess.run(["ss", "-K"] + selector,
-                           capture_output=True, text=True, timeout=10)
+            result = subprocess.run(["ss", "-K"] + selector,
+                                    capture_output=True, text=True, timeout=10)
+            if result.returncode != 0: ok = False
         except Exception as e:
             print("kick err", e, flush=True)
+            ok = False
+    return ok
 
 def xr_usage(token):
     # returns bytes, or None if the stats read FAILED. Never return 0 on failure:
@@ -870,9 +897,11 @@ def _set_auth_state(token, mode, slots):
     c = db(); c.execute("UPDATE users SET credential_mode=?,active_slots=? WHERE token=?",
                         (mode, _encode_slots(slots), token)); c.commit(); c.close()
 
+@serialized_membership
 def _reconcile_user_membership(u, before_recipe=None, before_settings=None):
     """Reconcile each endpoint without rotating credentials on other endpoints."""
     token, secret = u["token"], u["uuid"]
+    if retired_shop_token(token): return True, set(), {}
     desired = active_slot_keys(token)
     previous = (_decode_slots(u["active_slots"]) if u["active_slots"] is not None else
                 active_slot_keys(token, before_recipe, before_settings))
@@ -1122,6 +1151,16 @@ def ob_catchall_index(obs):
             return i
     return None
 
+def _direct_domain_rule(obs, **scope):
+    domains = list(dict.fromkeys(
+        domain[1:] for outbound in obs for domain in (outbound.get("domains") or [])
+        if domain and domain.startswith("!") and len(domain) > 1
+    ))
+    if domains:
+        return {"type": "field", "domain": domains, "outboundTag": "mj-direct:exception", **scope}
+    return None
+
+
 def build_xray_sections(obs, custom=None):
     """-> (outbounds, routing rules, loopback test inbounds).
 
@@ -1154,8 +1193,11 @@ def build_xray_sections(obs, custom=None):
         if user_catch is not None:
             # Match the global catch-all's safety rule, but only for this link.
             rules.append({"type": "field", "user": user, "ip": ["geoip:private"], "outboundTag": "direct"})
+        direct_rule = _direct_domain_rule(user_obs, user=user)
+        if direct_rule:
+            rules.append(direct_rule)
         for o in user_obs:
-            doms = [d for d in (o.get("domains") or []) if d]
+            doms = [d for d in (o.get("domains") or []) if d and not d.startswith("!")]
             if doms:
                 rules.append({"type": "field", "user": user, "domain": doms,
                               "outboundTag": ob_user_xtag(token, o["tag"])})
@@ -1166,10 +1208,15 @@ def build_xray_sections(obs, custom=None):
     if catch is not None:
         # never push LAN/loopback (incl. our own tunnel plumbing) through the upstream
         rules.append({"type": "field", "ip": ["geoip:private"], "outboundTag": "direct"})
+    direct_rule = _direct_domain_rule(obs)
+    if direct_rule:
+        rules.append(direct_rule)
     for o in obs:
-        doms = [d for d in (o.get("domains") or []) if d]
+        doms = [d for d in (o.get("domains") or []) if d and not d.startswith("!")]
         if doms:
             rules.append({"type": "field", "domain": doms, "outboundTag": ob_xtag(o["tag"])})
+    if any(rule["outboundTag"] == "mj-direct:exception" for rule in rules):
+        outs.append({**direct, "tag": "mj-direct:exception"})
     outs.append({"tag": "block", "protocol": "blackhole", "settings": {}})
     return outs, rules, tests
 
@@ -1360,7 +1407,9 @@ def test_outbound(tag):
             marks.append("%s ❌" % hostname)
     return "IP خروجی: %s · %s" % (ip, " · ".join(marks))
 
+@serialized_membership
 def write_sub(token, secret, label):
+    if retired_shop_token(token): return
     ips = effective_ips(token) or DEFAULT_IPS
     ipv4 = [address for address in ips if _is_ipv4(address)]
     names = list(dict.fromkeys(address for address in ips if not _is_ipv4(address)))
@@ -1486,6 +1535,7 @@ def create_user(vol_gb, dur_days, label=None):
     c.commit(); c.close()
     return token
 
+@serialized_membership
 def delete_user(token):
     c = db(); u = c.execute("SELECT * FROM users WHERE token=?", (token,)).fetchone()
     if not u: c.close(); return False
@@ -1510,6 +1560,7 @@ def delete_user(token):
     if routed:
         c.execute("INSERT INTO meta(k,v) VALUES('outbound_sync_pending','1') "
                   "ON CONFLICT(k) DO UPDATE SET v='1'")
+    shop.forget_service(c, token)
     c.execute("DELETE FROM users WHERE token=?", (token,)); c.commit(); c.close()
     del_sub(token)
     force_disconnect(tags)
@@ -1524,6 +1575,7 @@ def exhaust_reason(u, now=None):
     if (u["expiry_ts"] or 0) > 0 and now >= u["expiry_ts"]: return "زمان تمام شد"
     return None
 
+@serialized_membership
 def disable_user(token):
     # exhausted: stop service (remove from xray) but KEEP the row + sub file so it can be renewed within the grace window
     tags = tags_to_cut_for_user(token)  # capture BEFORE rmu
@@ -1537,6 +1589,7 @@ def disable_user(token):
     force_disconnect(tags)           # cut the live session so quota/expiry actually takes effect now
     return removed
 
+@serialized_membership
 def reenable_user(token):
     c = db(); u = c.execute("SELECT * FROM users WHERE token=?", (token,)).fetchone(); c.close()
     if not u or u["pending_delete"]: return False
@@ -1555,6 +1608,7 @@ def maybe_reenable(token, refresh=False):
         if u and not exhaust_reason(u): return reenable_user(token)
     return False
 
+@serialized_membership
 def freeze_user(token):
     # manual admin freeze: cut the link NOW and keep it out of xray until unfrozen. Fully
     # independent of the quota/expiry disable — no 48h grace, and the enforcer never touches it.
@@ -1568,6 +1622,7 @@ def freeze_user(token):
     force_disconnect(tags)           # drop the live session immediately
     return removed
 
+@serialized_membership
 def unfreeze_user(token):
     c = db(); u = c.execute("SELECT * FROM users WHERE token=?", (token,)).fetchone(); c.close()
     if not u or u["pending_delete"]: return False
@@ -1788,6 +1843,7 @@ def panel_usage_summary():
     last30 = c.execute("SELECT COALESCE(SUM(max(end_used-start_used,0)),0) v FROM usage_daily WHERE day>=?", (cutoff30,)).fetchone()["v"]
     c.close(); return int(total), int(today), int(last30)
 
+@serialized_membership
 def resync_all(allow_missing_stats_restart=True):
     # A restart clears Xray's dynamic users. Reconcile stored identities first,
     # then register every eligible identity again, including unchanged slots.
@@ -2922,7 +2978,7 @@ def _render_link_outbounds(obs, editable):
                         "style='width:100%%;max-width:100%%'>"
                         "<label class=hint for='ob_link_%d'>لینک خروجی</label>"
                         "<textarea id='ob_link_%d' name='ob_link_%d' rows=3 dir=ltr>%s</textarea>"
-                        "<label class=hint for='ob_dom_%d'>دامنه‌ها؛ هر خط یکی. خالی = خروجی همهٔ ترافیک</label>"
+                        "<label class=hint for='ob_dom_%d'>دامنه‌ها، هر خط یکی. برای مسیر مستقیم: <code dir=ltr>!geosite:youtube</code>. خالی = همهٔ ترافیک</label>"
                         "<textarea id='ob_dom_%d' name='ob_dom_%d' rows=3 dir=ltr>%s</textarea>"
                         "<label class=row><input type=checkbox name='ob_delete_%d'>حذف این خروجی</label>"
                         "</div></div>" % (i, i, i, tag, i, i, i, link, i, i, i, domains, i))
@@ -2938,7 +2994,7 @@ def _render_link_outbounds(obs, editable):
                     "<input type=text name=new_ob_tag maxlength=24 placeholder='نام کوتاه، مثلاً clean-ai' "
                     "style='width:100%;max-width:100%'>"
                     "<textarea name=new_ob_link rows=3 dir=ltr placeholder='vless://… یا socks://…'></textarea>"
-                    "<label class=hint for=new_ob_dom>دامنه‌ها؛ هر خط یکی. خالی = همهٔ ترافیک</label>"
+                    "<label class=hint for=new_ob_dom>دامنه‌ها، هر خط یکی. برای مسیر مستقیم: <code dir=ltr>!geosite:youtube</code>. خالی = همهٔ ترافیک</label>"
                     "<textarea id=new_ob_dom name=new_ob_dom rows=3 dir=ltr></textarea>"
                     "</div></div>")
     elif not rows:
@@ -3052,7 +3108,7 @@ def _ob_card(i, o, csrf):
         "<details><summary class=hint>نمایش لینک اتصال</summary><p class=hint dir=ltr style='word-break:break-all;text-align:left'>%s</p></details>"
         "<span class='pill oball' id='all-%s' style='display:none'></span>"
         "<label class=hint style='margin-top:8px'>دامنه‌هایی که از این خروجی بروند "
-        "(هر خط یکی) — <b>خالی بگذارید تا همهٔ ترافیک از اینجا برود</b>:</label>"
+        "(هر خط یکی). برای مسیر مستقیم: <code dir=ltr>!geosite:youtube</code>. <b>خالی بگذارید تا همهٔ ترافیک از اینجا برود</b>:</label>"
         "<textarea name='dom_%s' data-tag='%s' rows=4 form=obform "
         "placeholder='خالی = همهٔ ترافیک&#10;یا مثلاً:&#10;geosite:google&#10;claude.ai'>%s</textarea>"
         "<div class=obres id='res-%s'%s>%s</div>"
