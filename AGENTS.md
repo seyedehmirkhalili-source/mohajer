@@ -401,3 +401,10 @@ the day-2 runbook.
 - Admin → shop → users → select a user offers add, subtract and set-final-balance controls. Setting a final balance, including zero, computes the delta inside `BEGIN IMMEDIATE` and writes through `wallet_apply`; no-op settings do not create fake ledger movements. Amount plus reason is required, and the customer and admin audit receive the change.
 - Recurring wallet renewal is removed: no scheduler, due calculation, worker or toggle remains. Startup resets legacy `shop_services.auto_renew` flags to zero, and old `c:auto:*` buttons cannot re-enable it. Old unfulfilled automatic charges are refunded exactly once instead of renewed. Keep legacy columns and financial records for compatibility and history. Receipt auto-approval remains a separate active feature.
 - Customer buttons are «دریافت فایل کانفیگ‌ها» and «تغییر رمز اتصال»; their existing callbacks/actions remain unchanged.
+
+## Customer order tracking (2026-11-25)
+
+- `c:orders:<page>` lists eight invoices belonging to the requester; `c:order:<id>` verifies ownership before showing any payment or service details. These views never change payment, receipt or wallet state.
+- `approved` without `delivered_ts` is pending delivery, never fulfilled. Auto-approved unreviewed receipts retain a distinct review-pending label. Expired invoice views stop offering payment even before the background expiry tick.
+- «قوانین» in the customer menu reads the current editable terms without granting checkout acceptance. «سفارش‌های من» is also linked from new checkout invoices and receipt acknowledgements.
+- `scripts/check_shop_flow.py` is an offline acceptance walkthrough using the real update router, SQLite and subscription generation with mocked Telegram/Xray boundaries. It saves a transcript and real renderer HTML without credentials or network calls.

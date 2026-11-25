@@ -43,7 +43,9 @@ class FreezeBase(unittest.TestCase):
 
 class FreezeTests(FreezeBase):
     def test_migration_added_frozen_column(self):
-        cols = [r[1] for r in bot.db().execute("PRAGMA table_info(users)").fetchall()]
+        c = bot.db()
+        try: cols = [r[1] for r in c.execute("PRAGMA table_info(users)").fetchall()]
+        finally: c.close()
         self.assertIn("frozen", cols)
 
     def test_freeze_sets_flag_rmus_and_cuts_session(self):

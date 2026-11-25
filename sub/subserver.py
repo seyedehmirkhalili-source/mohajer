@@ -182,7 +182,7 @@ def decorate(links, info):
     return out + links
 
 PAGE = """<!doctype html><html lang="fa" dir="rtl"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <link rel="preload" href="/sub-font-vazirmatn-v33.003.woff2" as="font" type="font/woff2" crossorigin>
 <title>%TITLE%</title>
@@ -202,7 +202,7 @@ body{font-family:var(--sans);background:var(--paper);color:var(--ink);padding:22
 .phead{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 0 22px}
 .brand{display:flex;align-items:center;gap:10px;font-size:18px;font-weight:800;letter-spacing:-.02em}
 .mark{display:grid;place-items:center;width:36px;height:36px;border-radius:10px;background:var(--accent);color:var(--accent-text)}
-.tbtn{display:grid;place-items:center;width:40px;height:40px;padding:0;flex:0 0 auto;border:1px solid var(--line);border-radius:11px;background:var(--card);color:var(--ink)}
+.tbtn{display:grid;place-items:center;width:44px;height:44px;padding:0;flex:0 0 auto;border:1px solid var(--line);border-radius:11px;background:var(--card);color:var(--ink)}
 .tbtn .icon{grid-area:1/1}
 h1{font-size:clamp(25px,5vw,34px);letter-spacing:-.03em;line-height:1.3;margin:0 0 6px}
 h2{font-size:16px;margin:0 0 6px}
@@ -219,6 +219,8 @@ p{margin:0}
 .quickhead .icon{color:var(--accent);margin-top:2px}
 .hint2{color:var(--mut);font-size:12px;line-height:1.7}
 .btn,button{font:inherit;font-size:13px;font-weight:750;cursor:pointer;transition:background .18s,transform .18s,border-color .18s}
+.btn,button{min-height:44px}
+:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 .btn{display:flex;align-items:center;justify-content:center;gap:8px;border:1px solid transparent;border-radius:11px;padding:11px 16px;background:var(--accent);color:var(--accent-text);text-decoration:none;text-align:center}
 .btn:hover,button:hover{transform:translateY(-1px)}
 .btn:active,button:active{transform:translateY(1px)}

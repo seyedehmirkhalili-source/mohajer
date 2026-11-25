@@ -355,7 +355,8 @@ def start_referrer(text):
 # ---------------- customer UI ----------------
 B_BUY, B_TEST, B_SERVICES, B_WALLET = "🛒 خرید سرویس", "🎁 تست رایگان", "📦 سرویس‌های من", "💰 کیف پول"
 B_INVITE, B_REPORT, B_GUIDE, B_ACCOUNT = "👥 دعوت دوستان", "🛠 گزارش اختلال", "📚 آموزش اتصال", "👤 حساب من"
-CUSTOMER_MENU = [[B_BUY, B_TEST], [B_SERVICES, B_WALLET], [B_INVITE, B_REPORT], [B_GUIDE, B_ACCOUNT]]
+B_ORDERS, B_RULES = "🧾 سفارش‌های من", "📜 قوانین"
+CUSTOMER_MENU = [[B_BUY, B_TEST], [B_SERVICES, B_WALLET], [B_INVITE, B_REPORT], [B_GUIDE, B_ACCOUNT], [B_ORDERS, B_RULES]]
 
 MAINTENANCE_TEXT = "🛠 در حال به‌روزرسانی ربات هستیم.\nچند دقیقهٔ دیگر دوباره سر بزن 🙏"
 BLOCKED_TEXT = "⛔️ دسترسی شما به این ربات محدود شده است."
@@ -379,7 +380,8 @@ def link_kb(token, extra=None):
     return rows + (extra or [])
 
 # --- purchase terms ---
-DEFAULT_TERMS = "لطفاً پیش از خرید توجه کنید: در صورت اختلال یا قطعی اینترنت، مسئولیتی در قبال مشکلات ناشی از آن نداریم."
+DEFAULT_TERMS = ("لطفاً پیش از خرید توجه کنید: اختلال یا قطعی اینترنت و محدودیت‌های اپراتورها خارج از کنترل ماست و مسئولیت مشکلات ناشی از آن را نمی‌پذیریم.\n\n"
+                 "مشکلات نرم‌افزار اتصال یا تنظیمات دستگاه کاربر نیز خارج از مسئولیت ماست. برای راهنمایی از بخش گزارش اختلال استفاده کنید.")
 TERMS_TTL = 3600
 
 def terms_text():
@@ -865,6 +867,65 @@ OPEN = ("awaiting", "review")
 def get_order(oid):
     c = core.db(); r = c.execute("SELECT * FROM shop_orders WHERE id=?", (oid,)).fetchone(); c.close(); return r
 
+ORDER_PAGE_SIZE = 8
+
+def order_status(o, now=None):
+    now = int(time.time()) if now is None else now
+    if o["status"] == "approved":
+        if not o["delivered_ts"]: return "پرداخت تأیید شده؛ در انتظار تحویل"
+        if auto_review_pending(o): return "تحویل شده؛ رسید در انتظار بررسی مدیر"
+        return "تحویل شده"
+    if o["status"] == "awaiting" and now >= o["created_ts"] + ORDER_TTL:
+        return "مهلت پرداخت گذشته"
+    return {"awaiting": "در انتظار پرداخت", "review": "رسید در انتظار بررسی", "rejected": "رد شده",
+            "expired": "مهلت پرداخت گذشته", "cancelled": "لغو شده", "failed": "ناموفق؛ مبلغ به کیف پول برگشته"}.get(o["status"], "نیازمند بررسی پشتیبانی")
+
+def order_kb(oid):
+    return [[{"text": "🧾 پیگیری سفارش", "callback_data": "c:order:%d" % oid}]]
+
+def orders_view(uid, page=0):
+    page = max(0, min(page, 1000000))
+    c = core.db()
+    try:
+        rows = c.execute("SELECT * FROM shop_orders WHERE tg_id=? ORDER BY id DESC LIMIT ? OFFSET ?",
+                         (uid, ORDER_PAGE_SIZE + 1, page * ORDER_PAGE_SIZE)).fetchall()
+    finally:
+        c.close()
+    if not rows:
+        return "🧾 هنوز سفارشی در این صفحه نداری.", [[{"text": "صفحهٔ اول", "callback_data": "c:orders:0"},
+                                                        {"text": "🛒 خرید سرویس", "callback_data": "c:buy"}]]
+    kb = [[{"text": "#%s · %s · %s" % (fa(o["id"]), toman(o["amount"]), order_status(o)),
+            "callback_data": "c:order:%d" % o["id"]}] for o in rows[:ORDER_PAGE_SIZE]]
+    nav = []
+    if page: nav.append({"text": "قبلی", "callback_data": "c:orders:%d" % (page - 1)})
+    if len(rows) > ORDER_PAGE_SIZE: nav.append({"text": "بعدی", "callback_data": "c:orders:%d" % (page + 1)})
+    if nav: kb.append(nav)
+    return "🧾 <b>سفارش‌های من</b>\nبرای دیدن وضعیت و جزئیات، سفارش را انتخاب کن.", kb
+
+def order_view(uid, oid, now=None):
+    now = int(time.time()) if now is None else now
+    o = get_order(oid)
+    back = [[{"text": "بازگشت به سفارش‌ها", "callback_data": "c:orders:0"}]]
+    if not o or o["tg_id"] != uid: return "این سفارش پیدا نشد.", back
+    text = ("🧾 <b>سفارش #%s</b>\n\n%s\nنوع: %s\nمبلغ فاکتور: <b>%s</b>\nتاریخ: %s\nروش پرداخت: %s" %
+            (fa(oid), order_status(o, now), ORDER_KINDS.get(o["kind"], "سفارش"), toman(o["amount"]),
+             fa_date(o["created_ts"]), "کیف پول" if o["pay_method"] == "wallet" else "کارت‌به‌کارت"))
+    if o["kind"] != "topup": text += "\nبسته: %s" % plan_title(o["gb"], o["days"])
+    if o["paid_amount"] is not None: text += "\nواریزی ثبت‌شده: %s" % toman(o["paid_amount"])
+    if o["note"]: text += "\nتوضیح بررسی: %s" % html.escape(o["note"])
+    kb = [[{"text": "🔄 بروزرسانی وضعیت", "callback_data": "c:order:%d" % oid}]]
+    if o["status"] == "awaiting" and now < o["created_ts"] + ORDER_TTL:
+        text += "\n\n" + payment_text(o)
+        kb.append([{"text": "❌ لغو سفارش", "callback_data": "c:cancel:%d" % oid}])
+    elif o["status"] == "review": text += "\n\nرسید ثبت شده است؛ نیازی به پرداخت دوباره نیست."
+    elif o["status"] == "approved" and not o["delivered_ts"]:
+        text += "\n\nربات تحویل را دوباره امتحان می‌کند؛ دوباره پرداخت نکن."
+    if o["delivered_ts"] and o["status"] == "approved" and o["kind"] != "topup" and owned_service(uid, o["token"]):
+        kb.append([{"text": "📦 سرویس و اطلاعات اتصال", "callback_data": "c:svc:%s" % o["token"]}])
+    text += "\n\nبرای پشتیبانی، شمارهٔ این سفارش را در بخش گزارش اختلال بنویس."
+    kb.append([{"text": "🛠 پشتیبانی", "callback_data": "c:report"}])
+    return text, kb + back
+
 def create_order(uid, kind, price, plan=None, token=None, now=None):
     """Create an invoice for the displayed price; cancel older unpaid invoices."""
     now = int(time.time()) if now is None else now
@@ -921,7 +982,7 @@ def start_payment(chat, mid, uid, plan_id, token=None):
         for a in owner_ids(): core.send(a, "⚠️ مشتری می‌خواست بخرد ولی هیچ کارت فعالی تعریف نشده است.")
         return
     consume_terms(uid)
-    core.edit(chat, mid, payment_text(o), [[{"text": "❌ لغو سفارش", "callback_data": "c:cancel:%d" % o["id"]}]])
+    core.edit(chat, mid, payment_text(o), order_kb(o["id"]) + [[{"text": "❌ لغو سفارش", "callback_data": "c:cancel:%d" % o["id"]}]])
 
 def cancel_order(chat, mid, uid, oid):
     c = core.db()
@@ -984,7 +1045,7 @@ def receive_receipt(chat, uid, file_ref, file_uid, now=None, oid=None):
         if not token:
             say(chat, "رسید به‌صورت خودکار تأیید شد. ساخت سرویس هنوز کامل نشده و ربات دوباره تلاش می‌کند.\nشمارهٔ سفارش: #%s" % fa(o["id"]))
     else:
-        say(chat, "✅ رسیدت رسید! بعد از بررسی خبرت می‌کنیم 🙏\nشمارهٔ سفارش: #%s" % fa(o["id"]))
+        core.send(chat, "✅ رسیدت رسید! بعد از بررسی خبرت می‌کنیم 🙏\nشمارهٔ سفارش: #%s" % fa(o["id"]), order_kb(o["id"]))
     send_review(o["id"])
 
 
@@ -2203,6 +2264,8 @@ def customer_message(chat, uid, m):
         if text == B_TEST: test_offer(chat, uid); return
         if text == B_ACCOUNT: core.send(chat, account_text(uid), account_kb(uid)); return
         if text == B_GUIDE: core.send(chat, GUIDE_TEXT, guide_kb()); return
+        if text == B_ORDERS: core.send(chat, *orders_view(uid)); return
+        if text == B_RULES: core.send(chat, "📜 <b>قوانین خرید</b>\n\n" + html.escape(terms_text())); return
         say(chat, SOON_TEXT); return
     st = get_state(uid) or {}
     if st.get("stage") == "topup_amount":
@@ -2213,6 +2276,12 @@ def customer_message(chat, uid, m):
     customer_menu(chat)
 
 def customer_callback(chat, mid, uid, data, cbid, user=None):
+    route = data.split(":")
+    if len(route) == 3 and route[:2] in (["c", "orders"], ["c", "order"]) and _int(route[2]) is not None:
+        core.answer(cbid)
+        if route[1] == "orders": core.edit(chat, mid, *orders_view(uid, int(route[2])))
+        else: core.edit(chat, mid, *order_view(uid, int(route[2])))
+        return
     if data == "c:test":
         core.answer(cbid); claim_test(chat, mid, uid, (user or {}).get("first_name")); return
     if data == "c:guide":
